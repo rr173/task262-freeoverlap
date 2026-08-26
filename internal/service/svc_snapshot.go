@@ -1,6 +1,8 @@
 package service
 
 import (
+	"encoding/json"
+
 	"task262-freeoverlap/internal/diag"
 	"task262-freeoverlap/internal/model"
 	"task262-freeoverlap/internal/overlap"
@@ -41,16 +43,21 @@ func (s *Service) ListSnapshots(batchID string) ([]*model.ReliabilitySnapshot, e
 }
 
 // PublishSnapshot 发布快照（不可变冻结）。
+//
+// 可发布性以快照实际承载的诊断结论为准：解出快照内容里的 DiagnosisReport，
+// 只有收敛（无断层）的快照才允许冻结并封存批次。校验快照内容而非批次已存
+// 状态，可避免批次先被判 publishable、随后数据变化产生断层时仍被错误封存。
+// 批次最终能否被封存由 store 的原子条件更新兜底（须仍处于 publishable）。
 func (s *Service) PublishSnapshot(snapshotID string) (*model.ReliabilitySnapshot, error) {
 	sn, err := s.store.GetSnapshot(snapshotID)
 	if err != nil {
 		return nil, err
 	}
-	batch, err := s.store.GetBatch(sn.BatchID)
-	if err != nil {
-		return nil, err
+	var report model.DiagnosisReport
+	if err := json.Unmarshal([]byte(sn.Snapshot), &report); err != nil {
+		return nil, model.E(model.ErrInvalid, "snapshot %s content is not a valid diagnosis: %v", snapshotID, err)
 	}
-	if err := snapshot.ValidatePublication(batch.Status); err != nil {
+	if err := snapshot.ValidatePublication(&report); err != nil {
 		return nil, err
 	}
 	if err := snapshot.Publish(sn); err != nil {

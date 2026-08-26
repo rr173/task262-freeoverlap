@@ -20,11 +20,16 @@ func Create(batchID, label, content string) *model.ReliabilitySnapshot {
 	}
 }
 
-// ValidatePublication enforces the aggregate lifecycle rule: only a batch
-// whose latest diagnosis is publishable may be frozen as reliable evidence.
-func ValidatePublication(batchStatus model.BatchStatus) error {
-	if batchStatus != model.BatchPublishable {
-		return model.E(model.ErrStateMismatch, "batch status %s is not publishable", batchStatus)
+// ValidatePublication enforces the aggregate lifecycle rule: only a snapshot
+// whose baked-in diagnosis is actually publishable may be frozen as reliable
+// evidence. Verifying the report (rather than the batch's stored status) is
+// what stops a batch that was classified publishable and later grew a gap from
+// being sealed together with an unreliable snapshot: the snapshot content is
+// recomputed from current data on creation, so it reflects the truth even when
+// the persisted batch status is stale.
+func ValidatePublication(report *model.DiagnosisReport) error {
+	if report == nil || !report.Converged {
+		return model.E(model.ErrStateMismatch, "snapshot diagnosis is not publishable")
 	}
 	return nil
 }

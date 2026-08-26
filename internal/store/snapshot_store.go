@@ -81,8 +81,12 @@ func (s *Store) UpdateSnapshotStatus(id string, status model.SnapshotStatus, fro
 }
 
 // CommitSnapshotPublication atomically freezes a draft and seals its batch.
-// The conditional snapshot update guarantees that concurrent publishers can
-// produce at most one successful publication.
+// Both updates are conditional: the snapshot must still be a draft, and the
+// batch must still be publishable. A batch classified insufficient cannot be
+// sealed here, which is the last line of defense against publishing an
+// unreliable (gapped) snapshot whose content a publisher already accepted.
+// The conditional snapshot update also guarantees that concurrent publishers
+// can produce at most one successful publication.
 func (s *Store) CommitSnapshotPublication(id, batchID string, frozenAt int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -109,8 +113,8 @@ func (s *Store) CommitSnapshotPublication(id, batchID string, frozenAt int64) er
 		return rollback(model.E(model.ErrConflict, "snapshot %s is no longer draft", id))
 	}
 	res, err = tx.Exec(
-		`UPDATE calc_batches SET status = ?, updated_at = ? WHERE id = ?`,
-		string(model.BatchSealed), model.NowMillis(), batchID)
+		`UPDATE calc_batches SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		string(model.BatchSealed), model.NowMillis(), batchID, string(model.BatchPublishable))
 	if err != nil {
 		return rollback(err)
 	}
@@ -119,7 +123,7 @@ func (s *Store) CommitSnapshotPublication(id, batchID string, frozenAt int64) er
 		return rollback(err)
 	}
 	if n != 1 {
-		return rollback(model.E(model.ErrNotFound, "batch %s not found", batchID))
+		return rollback(model.E(model.ErrStateMismatch, "batch %s is not publishable, cannot seal", batchID))
 	}
 	if err := tx.Commit(); err != nil {
 		return err

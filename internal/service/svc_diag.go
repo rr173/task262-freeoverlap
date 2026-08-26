@@ -58,10 +58,7 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 		return nil, err
 	}
 	// 推进批次状态。
-	next := model.BatchPublishable
-	if !report.Converged {
-		next = model.BatchInsufficient
-	}
+	next := diag.StatusFromReport(report)
 	if !model.CanApplyDiagnosisStatus(batch.Status, next) {
 		return nil, model.E(model.ErrStateMismatch,
 			"cannot apply diagnosis status %s to batch %s in %s", next, batchID, batch.Status)

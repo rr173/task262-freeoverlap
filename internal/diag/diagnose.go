@@ -161,6 +161,18 @@ func PreserveAdjudications(report *model.DiagnosisReport, current, previous []*m
 	}
 }
 
+// StatusFromReport derives the batch classification a diagnosis implies: a
+// converged report (no gaps, no unconverged windows, enough active windows)
+// is publishable; anything else is insufficient. This is the single source of
+// truth used both when persisting a fresh diagnosis and when re-deriving
+// publishability from the report baked into a snapshot.
+func StatusFromReport(report *model.DiagnosisReport) model.BatchStatus {
+	if report.Converged {
+		return model.BatchPublishable
+	}
+	return model.BatchInsufficient
+}
+
 // RenderSnapshot 把诊断报告序列化为快照内容。
 func RenderSnapshot(report *model.DiagnosisReport) (string, error) {
 	b, err := json.MarshalIndent(report, "", "  ")
