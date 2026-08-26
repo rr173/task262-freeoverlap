@@ -1,6 +1,8 @@
 package service
 
 import (
+	"sort"
+
 	"task262-freeoverlap/internal/diag"
 	"task262-freeoverlap/internal/model"
 	"task262-freeoverlap/internal/overlap"
@@ -24,6 +26,18 @@ func (s *Service) CreateSnapshot(batchID, label string) (*model.ReliabilitySnaps
 	if err != nil {
 		return nil, err
 	}
+	// 合并上一轮已落库的人工裁决（resample + note），使快照报告与持久化边列表
+	// 逐条一致；只读渲染，不在此处落库边（边由最近一次 RunDiagnosis 维护）。
+	active, err := s.activeWindows(batchID)
+	if err != nil {
+		return nil, err
+	}
+	previousEdges, err := s.store.ListEdges(batchID)
+	if err != nil {
+		return nil, err
+	}
+	diag.BuildEdgesWithAdjudications(report, active, previousEdges)
+
 	content, err := diag.RenderSnapshot(report)
 	if err != nil {
 		return nil, err
@@ -125,6 +139,24 @@ func (l *storeLoader) ListWindows(batchID string) ([]*model.SamplingWindow, erro
 
 func (l *storeLoader) ListSamples(windowID string) ([]*model.EnergySample, error) {
 	return l.st.ListSamples(windowID)
+}
+
+// activeWindows 返回批次下「按 center 升序、已剔 excluded」的有效窗口，
+// 与 diag.Diagnose 生成报告时使用的窗口顺序保持一致。诊断重建边与合并裁决
+// 都依赖该顺序，故 RunDiagnosis 与 CreateSnapshot 必须共用同一来源。
+func (s *Service) activeWindows(batchID string) ([]*model.SamplingWindow, error) {
+	windows, err := s.store.ListWindows(batchID)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(windows, func(i, j int) bool { return windows[i].Center < windows[j].Center })
+	var active []*model.SamplingWindow
+	for _, w := range windows {
+		if w.Status != model.WindowExcluded {
+			active = append(active, w)
+		}
+	}
+	return active, nil
 }
 
 func (s *Service) listAllEdges() ([]*model.WindowEdge, error) {

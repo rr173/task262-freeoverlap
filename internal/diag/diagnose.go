@@ -134,6 +134,33 @@ func EdgesFromReport(report *model.DiagnosisReport, lowerIDs, upperIDs []string)
 	return out
 }
 
+// BuildEdgesWithAdjudications 把一次诊断报告重建为可落库的 WindowEdge 列表，
+// 并把上一轮已落库的人工裁决（resample + note）合并回报告与边。
+//
+// active 必须是「按 center 升序、已剔 excluded」的有效窗口，与 Diagnose 生成
+// report.Edges 的顺序保持一致；previous 为该批次上一轮已落库的边列表。
+//
+// 返回的边已被 PreserveAdjudications 原地改写（状态/note 同步自上一轮裁决），
+// report 也被原地合并，使报告内容与返回的边列表逐条一致。调用方据此决定是否
+// 落库：RunDiagnosis 会 ReplaceEdges，CreateSnapshot 只读渲染而不落库。
+//
+// 之所以集中在此：任何「按报告重建边并合并裁决」的调用方都必须走同一段逻辑，
+// 否则会出现某条调用路径（如建快照）漏掉裁决合并、导致报告与边列表不一致。
+func BuildEdgesWithAdjudications(report *model.DiagnosisReport, active []*model.SamplingWindow, previous []*model.WindowEdge) []*model.WindowEdge {
+	var current []*model.WindowEdge
+	if len(active) >= 2 {
+		lower := make([]string, 0, len(active)-1)
+		upper := make([]string, 0, len(active)-1)
+		for i := 0; i+1 < len(active); i++ {
+			lower = append(lower, active[i].ID)
+			upper = append(upper, active[i+1].ID)
+		}
+		current = EdgesFromReport(report, lower, upper)
+	}
+	PreserveAdjudications(report, current, previous)
+	return current
+}
+
 // PreserveAdjudications carries explicit resampling decisions into a refreshed
 // diagnosis. The numerical overlap is recomputed, while the researcher's
 // disposition and note remain authoritative for the same adjacent pair.

@@ -1,8 +1,6 @@
 package service
 
 import (
-	"sort"
-
 	"task262-freeoverlap/internal/diag"
 	"task262-freeoverlap/internal/model"
 )
@@ -30,30 +28,16 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 			return nil, err
 		}
 	}
-	// 落库边。
-	windows, _ := s.store.ListWindows(batchID)
-	sort.Slice(windows, func(i, j int) bool { return windows[i].Center < windows[j].Center })
-	var active []*model.SamplingWindow
-	for _, w := range windows {
-		if w.Status != model.WindowExcluded {
-			active = append(active, w)
-		}
-	}
-	var currentEdges []*model.WindowEdge
-	if len(active) >= 2 {
-		lower := make([]string, 0, len(active)-1)
-		upper := make([]string, 0, len(active)-1)
-		for i := 0; i+1 < len(active); i++ {
-			lower = append(lower, active[i].ID)
-			upper = append(upper, active[i+1].ID)
-		}
-		currentEdges = diag.EdgesFromReport(report, lower, upper)
+	// 重建边并合并上一轮已落库的人工裁决（resample + note），保证报告与边列表一致。
+	active, err := s.activeWindows(batchID)
+	if err != nil {
+		return nil, err
 	}
 	previousEdges, err := s.store.ListEdges(batchID)
 	if err != nil {
 		return nil, err
 	}
-	diag.PreserveAdjudications(report, currentEdges, previousEdges)
+	currentEdges := diag.BuildEdgesWithAdjudications(report, active, previousEdges)
 	if err := s.store.ReplaceEdges(batchID, currentEdges); err != nil {
 		return nil, err
 	}
