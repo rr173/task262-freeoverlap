@@ -1,6 +1,8 @@
 package store
 
 import (
+	"math"
+
 	"task262-freeoverlap/internal/model"
 )
 
@@ -8,7 +10,16 @@ import (
 
 // InsertSamples 原子导入一批能量样本，并同步窗口样本计数。
 // content_hash 唯一冲突按幂等重复处理；任何其他错误都会回滚整批请求。
+//
+// 任一样本的 energy 或 bias 为 NaN/Inf 都会让重加权不可解，因此在开
+// 启事务之前即整批拒绝——非法观测绝不落库，窗口计数保持导入前状态。
 func (s *Store) InsertSamples(windowID string, samples []*model.EnergySample) (int, error) {
+	for _, sm := range samples {
+		if math.IsNaN(sm.Energy) || math.IsInf(sm.Energy, 0) ||
+			math.IsNaN(sm.Bias) || math.IsInf(sm.Bias, 0) {
+			return 0, model.E(model.ErrInvalid, "sample %s has non-finite energy/bias", sm.ID)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
