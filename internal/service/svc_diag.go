@@ -17,6 +17,20 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 	if batch.Status.IsTerminal() {
 		return nil, model.E(model.ErrImmutable, "batch %s is sealed", batchID)
 	}
+	return s.diagnoseAndApply(batch)
+}
+
+// diagnoseAndApply runs a fresh diagnosis over the batch's current data and
+// commits the resulting projections to the store: per-window status, the edge
+// set (preserving prior adjudications), and—critically—the batch's own
+// publishability classification.
+//
+// Because publishability is a classification of *current* data, every path that
+// re-evaluates the diagnosis (RunDiagnosis and CreateSnapshot) must route
+// through here. Otherwise a batch that once passed diagnosis can keep a stale
+// publishable status after later data (e.g. a newly added window that opens a
+// gap) makes it unqualified. Sealed batches are rejected upstream by the caller.
+func (s *Service) diagnoseAndApply(batch *model.CalcBatch) (*model.DiagnosisReport, error) {
 	loader := &storeLoader{st: s.store}
 	resolve := func(windowID string) (*model.SamplingWindow, error) {
 		return s.store.GetWindow(windowID)
@@ -31,7 +45,7 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 		}
 	}
 	// 落库边。
-	windows, _ := s.store.ListWindows(batchID)
+	windows, _ := s.store.ListWindows(batch.ID)
 	sort.Slice(windows, func(i, j int) bool { return windows[i].Center < windows[j].Center })
 	var active []*model.SamplingWindow
 	for _, w := range windows {
@@ -49,24 +63,24 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 		}
 		currentEdges = diag.EdgesFromReport(report, lower, upper)
 	}
-	previousEdges, err := s.store.ListEdges(batchID)
+	previousEdges, err := s.store.ListEdges(batch.ID)
 	if err != nil {
 		return nil, err
 	}
 	diag.PreserveAdjudications(report, currentEdges, previousEdges)
-	if err := s.store.ReplaceEdges(batchID, currentEdges); err != nil {
+	if err := s.store.ReplaceEdges(batch.ID, currentEdges); err != nil {
 		return nil, err
 	}
-	// 推进批次状态。
+	// 推进批次状态：发布资格是对当前数据的判定，随最新诊断同步。
 	next := model.BatchPublishable
 	if !report.Converged {
 		next = model.BatchInsufficient
 	}
 	if !model.CanApplyDiagnosisStatus(batch.Status, next) {
 		return nil, model.E(model.ErrStateMismatch,
-			"cannot apply diagnosis status %s to batch %s in %s", next, batchID, batch.Status)
+			"cannot apply diagnosis status %s to batch %s in %s", next, batch.ID, batch.Status)
 	}
-	if err := s.store.UpdateBatchStatus(batchID, next); err != nil {
+	if err := s.store.UpdateBatchStatus(batch.ID, next); err != nil {
 		return nil, err
 	}
 	return report, nil

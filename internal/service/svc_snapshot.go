@@ -9,7 +9,12 @@ import (
 	"task262-freeoverlap/internal/weight"
 )
 
-// CreateSnapshot 创建草稿快照（内容来自最新诊断）。
+// CreateSnapshot creates a draft snapshot whose content is the latest
+// diagnosis. Because building the snapshot re-evaluates the current data, it
+// also routes through diagnoseAndApply so the batch's publishability reflects
+// that latest data — a batch that once passed diagnosis must not stay
+// publishable after later data (e.g. a newly added gap window) makes it
+// unqualified, nor may a snapshot be frozen when the batch is not publishable.
 func (s *Service) CreateSnapshot(batchID, label string) (*model.ReliabilitySnapshot, error) {
 	batch, err := s.store.GetBatch(batchID)
 	if err != nil {
@@ -18,9 +23,7 @@ func (s *Service) CreateSnapshot(batchID, label string) (*model.ReliabilitySnaps
 	if batch.Status.IsTerminal() {
 		return nil, model.E(model.ErrImmutable, "batch %s is sealed", batchID)
 	}
-	report, err := diag.Diagnose(&storeLoader{st: s.store}, func(id string) (*model.SamplingWindow, error) {
-		return s.store.GetWindow(id)
-	}, batch)
+	report, err := s.diagnoseAndApply(batch)
 	if err != nil {
 		return nil, err
 	}
