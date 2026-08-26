@@ -25,13 +25,39 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := s.saveDiagnosis(report, batchID); err != nil {
+		return nil, err
+	}
+	// 推进批次状态。
+	next := model.BatchPublishable
+	if !report.Converged {
+		next = model.BatchInsufficient
+	}
+	if !model.CanApplyDiagnosisStatus(batch.Status, next) {
+		return nil, model.E(model.ErrStateMismatch,
+			"cannot apply diagnosis status %s to batch %s in %s", next, batchID, batch.Status)
+	}
+	if err := s.store.UpdateBatchStatus(batchID, next); err != nil {
+		return nil, err
+	}
+	return report, nil
+}
+
+// saveDiagnosis 持久化一次诊断报告的投影：窗口校正状态与相邻窗口边列表。
+// 边按当前仍生效（非 excluded）的相邻窗口重建，排除窗口参与的边不再留存；
+// 对同一相邻对保留研究者此前的 resample 裁决与备注，正常窗口的重叠数值与
+// gap/sufficient 判定保持为本次重计算结果。调用 ReplaceEdges 先清后插，保证
+// 边列表始终与本次诊断报告一致。
+func (s *Service) saveDiagnosis(report *model.DiagnosisReport, batchID string) error {
 	for _, ws := range report.Windows {
 		if err := s.store.UpdateWindowStatus(ws.ID, ws.Status, ws.SampleCount); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	// 落库边。
-	windows, _ := s.store.ListWindows(batchID)
+	windows, err := s.store.ListWindows(batchID)
+	if err != nil {
+		return err
+	}
 	sort.Slice(windows, func(i, j int) bool { return windows[i].Center < windows[j].Center })
 	var active []*model.SamplingWindow
 	for _, w := range windows {
@@ -51,25 +77,10 @@ func (s *Service) RunDiagnosis(batchID string) (*model.DiagnosisReport, error) {
 	}
 	previousEdges, err := s.store.ListEdges(batchID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	diag.PreserveAdjudications(report, currentEdges, previousEdges)
-	if err := s.store.ReplaceEdges(batchID, currentEdges); err != nil {
-		return nil, err
-	}
-	// 推进批次状态。
-	next := model.BatchPublishable
-	if !report.Converged {
-		next = model.BatchInsufficient
-	}
-	if !model.CanApplyDiagnosisStatus(batch.Status, next) {
-		return nil, model.E(model.ErrStateMismatch,
-			"cannot apply diagnosis status %s to batch %s in %s", next, batchID, batch.Status)
-	}
-	if err := s.store.UpdateBatchStatus(batchID, next); err != nil {
-		return nil, err
-	}
-	return report, nil
+	return s.store.ReplaceEdges(batchID, currentEdges)
 }
 
 // ListEdges 列出批次边。

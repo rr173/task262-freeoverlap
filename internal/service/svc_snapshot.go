@@ -24,6 +24,11 @@ func (s *Service) CreateSnapshot(batchID, label string) (*model.ReliabilitySnaps
 	if err != nil {
 		return nil, err
 	}
+	// 落库诊断投影（窗口状态与边列表），使边列表始终与本次诊断报告一致：
+	// 排除窗口参与的边不会作为旧关系留存，正常窗口的重叠数值与裁决得以保留。
+	if err := s.saveDiagnosis(report, batch.ID); err != nil {
+		return nil, err
+	}
 	content, err := diag.RenderSnapshot(report)
 	if err != nil {
 		return nil, err
