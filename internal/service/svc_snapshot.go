@@ -10,6 +10,11 @@ import (
 )
 
 // CreateSnapshot 创建草稿快照（内容来自最新诊断）。
+//
+// 诊断结论会重新计算每个有效窗口的收敛状态并写入快照内容；这里必须把
+// 同一份结论同步回 sampling_windows，使窗口列表/详情与快照报告保持一致，
+// 研究者才能从窗口列表识别需要重采样的窗口。排除窗口不在报告中，故不被
+// 触及，其既有状态予以保留。
 func (s *Service) CreateSnapshot(batchID, label string) (*model.ReliabilitySnapshot, error) {
 	batch, err := s.store.GetBatch(batchID)
 	if err != nil {
@@ -23,6 +28,13 @@ func (s *Service) CreateSnapshot(batchID, label string) (*model.ReliabilitySnaps
 	}, batch)
 	if err != nil {
 		return nil, err
+	}
+	// 与 RunDiagnosis 对齐：把本次诊断算出的窗口状态同步落库，使窗口详情
+	// 与快照内嵌报告一致。排除窗口不在 report.Windows 中，不会被改写。
+	for _, ws := range report.Windows {
+		if err := s.store.UpdateWindowStatus(ws.ID, ws.Status, ws.SampleCount); err != nil {
+			return nil, err
+		}
 	}
 	content, err := diag.RenderSnapshot(report)
 	if err != nil {
