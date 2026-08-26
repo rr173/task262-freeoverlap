@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"fmt"
 
 	"task262-freeoverlap/internal/model"
@@ -9,9 +10,13 @@ import (
 // --- 边 ---
 
 // UpsertEdge 插入或更新一条相邻窗口边（按 lower/upper 唯一键）。
+// 封存后的批次只读：拒绝向已封存批次写入边。
 func (s *Store) UpsertEdge(e *model.WindowEdge) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.sealedBatchErr(s.db, e.BatchID); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO window_edges (id, batch_id, lower_window_id, upper_window_id, overlap, status, note, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -27,6 +32,7 @@ func (s *Store) UpsertEdge(e *model.WindowEdge) error {
 // ReplaceEdges reconciles the persisted edge view with the latest diagnosis.
 // Edges involving excluded windows must disappear instead of surviving as
 // stale records after a rerun.
+// 封存后的批次只读：拒绝重写已封存批次的边视图。
 func (s *Store) ReplaceEdges(batchID string, edges []*model.WindowEdge) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -37,6 +43,9 @@ func (s *Store) ReplaceEdges(batchID string, edges []*model.WindowEdge) error {
 	rollback := func(err error) error {
 		_ = tx.Rollback()
 		return err
+	}
+	if err := s.sealedBatchErr(tx, batchID); err != nil {
+		return rollback(err)
 	}
 	if _, err := tx.Exec(`DELETE FROM window_edges WHERE batch_id = ?`, batchID); err != nil {
 		return rollback(err)
@@ -79,9 +88,17 @@ func (s *Store) ListEdges(batchID string) ([]*model.WindowEdge, error) {
 }
 
 // UpdateEdgeStatus 更新一条边的状态与备注（裁决）。
+// 封存后的批次只读：拒绝裁决已封存批次的边，避免发布后改写边结论。
 func (s *Store) UpdateEdgeStatus(id string, status model.EdgeStatus, note string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	batchID, err := s.edgeBatchID(s.db, id)
+	if err != nil {
+		return err
+	}
+	if err := s.sealedBatchErr(s.db, batchID); err != nil {
+		return err
+	}
 	res, err := s.db.Exec(
 		`UPDATE window_edges SET status = ?, note = ? WHERE id = ?`,
 		string(status), note, id)
@@ -93,4 +110,19 @@ func (s *Store) UpdateEdgeStatus(id string, status model.EdgeStatus, note string
 		return model.E(model.ErrNotFound, "edge %s not found", id)
 	}
 	return nil
+}
+
+// edgeBatchID resolves the owning batch of an edge so the seal check can guard
+// edge adjudications. A missing edge surfaces as ErrNotFound.
+func (s *Store) edgeBatchID(runner execRunner, edgeID string) (string, error) {
+	var batchID string
+	err := runner.QueryRow(
+		`SELECT batch_id FROM window_edges WHERE id = ?`, edgeID).Scan(&batchID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", model.E(model.ErrNotFound, "edge %s not found", edgeID)
+		}
+		return "", err
+	}
+	return batchID, nil
 }

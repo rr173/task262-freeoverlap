@@ -7,6 +7,34 @@ import (
 	"task262-freeoverlap/internal/model"
 )
 
+// sealedBatchErr reports the batch owning a window/edge as immutable when it
+// has reached the sealed terminal state. The check runs on the runner passed
+// in by the caller, which for transactional writes is the *sql.Tx itself, so
+// the liveness check is atomic with the subsequent mutation: a concurrent
+// publication cannot slip a seal in between the check and the write.
+func (s *Store) sealedBatchErr(runner execRunner, batchID string) error {
+	var status string
+	err := runner.QueryRow(
+		`SELECT status FROM calc_batches WHERE id = ?`, batchID).Scan(&status)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return model.E(model.ErrNotFound, "batch %s not found", batchID)
+		}
+		return err
+	}
+	if model.BatchStatus(status).IsTerminal() {
+		return model.E(model.ErrImmutable, "batch %s is sealed", batchID)
+	}
+	return nil
+}
+
+// execRunner narrows *sql.DB and *sql.Tx to the query surface the seal check
+// uses, so the same helper runs inside a write transaction and on the shared
+// connection.
+type execRunner interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // --- 批次 ---
 
 // CreateBatch 插入一个新批次。

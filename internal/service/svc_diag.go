@@ -78,6 +78,7 @@ func (s *Service) ListEdges(batchID string) ([]*model.WindowEdge, error) {
 }
 
 // AdjudicateEdge 裁决一条边（标记需重采样等）。
+// 封存后的批次只读：已发布快照的边结论不得再改写，避免当前数据与已发布结论不一致。
 func (s *Service) AdjudicateEdge(edgeID string, status model.EdgeStatus, note string) (*model.WindowEdge, error) {
 	edges, err := s.listAllEdges()
 	if err != nil {
@@ -92,6 +93,9 @@ func (s *Service) AdjudicateEdge(edgeID string, status model.EdgeStatus, note st
 	}
 	if target == nil {
 		return nil, model.E(model.ErrNotFound, "edge %s not found", edgeID)
+	}
+	if _, err := s.mutableBatch(target.BatchID); err != nil {
+		return nil, err
 	}
 	if err := s.store.UpdateEdgeStatus(edgeID, status, note); err != nil {
 		return nil, err

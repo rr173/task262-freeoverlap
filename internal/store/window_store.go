@@ -10,9 +10,13 @@ import (
 // --- 窗口 ---
 
 // CreateWindow 插入一个采样窗口。
+// 封存后的批次只读：拒绝向已封存批次追加窗口。
 func (s *Store) CreateWindow(w *model.SamplingWindow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.sealedBatchErr(s.db, w.BatchID); err != nil {
+		return err
+	}
 	_, err := s.db.Exec(
 		`INSERT INTO sampling_windows (id, batch_id, label, center, spring_const, bias_version, status, sample_count, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -64,9 +68,17 @@ func (s *Store) ListWindows(batchID string) ([]*model.SamplingWindow, error) {
 }
 
 // UpdateWindowStatus 更新窗口状态与样本数。
+// 封存后的批次只读：拒绝修改已封存批次的窗口。
 func (s *Store) UpdateWindowStatus(id string, status model.WindowStatus, sampleCount int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	batchID, err := s.windowBatchID(s.db, id)
+	if err != nil {
+		return err
+	}
+	if err := s.sealedBatchErr(s.db, batchID); err != nil {
+		return err
+	}
 	res, err := s.db.Exec(
 		`UPDATE sampling_windows SET status = ?, sample_count = ?, updated_at = ? WHERE id = ?`,
 		string(status), sampleCount, model.NowMillis(), id)
@@ -85,4 +97,20 @@ func (s *Store) CountSamples(windowID string) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM energy_samples WHERE window_id = ?`, windowID).Scan(&n)
 	return n, err
+}
+
+// windowBatchID resolves the owning batch of a window on a given runner so the
+// seal check can run inside the caller's write transaction (atomic with the
+// mutation). A missing window surfaces as ErrNotFound.
+func (s *Store) windowBatchID(runner execRunner, windowID string) (string, error) {
+	var batchID string
+	err := runner.QueryRow(
+		`SELECT batch_id FROM sampling_windows WHERE id = ?`, windowID).Scan(&batchID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", model.E(model.ErrNotFound, "window %s not found", windowID)
+		}
+		return "", err
+	}
+	return batchID, nil
 }
