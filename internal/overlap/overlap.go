@@ -115,18 +115,33 @@ func BuildHistogram(samples []*model.EnergySample, min, max float64, bins int) *
 }
 
 // RangeOf 计算样本集合的能量最小/最大值。
+//
+// 与 BuildHistogram 一致，只纳入偏置校正后可重加权（IsUsableWeight）的观测。
+// 校正失败（权重为 0 或非有限）的异常观测对分布无贡献，不能参与能量范围
+// 判定，否则会撑大直方图覆盖区间、稀释分箱分辨率，从而把真正分离的两个
+// 有效分布误判为重叠充分，掩盖实际断层。若没有任何可用观测，回退默认范围。
 func RangeOf(samples []*model.EnergySample) (float64, float64) {
 	if len(samples) == 0 {
 		return 0, 1
 	}
-	lo, hi := samples[0].Energy, samples[0].Energy
+	lo, hi := math.NaN(), math.NaN()
 	for _, sm := range samples {
+		if !model.IsUsableWeight(sm.Weight) {
+			continue
+		}
+		if math.IsNaN(lo) {
+			lo, hi = sm.Energy, sm.Energy
+			continue
+		}
 		if sm.Energy < lo {
 			lo = sm.Energy
 		}
 		if sm.Energy > hi {
 			hi = sm.Energy
 		}
+	}
+	if math.IsNaN(lo) {
+		return 0, 1
 	}
 	return lo, hi
 }
