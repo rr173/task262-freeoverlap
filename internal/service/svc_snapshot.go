@@ -41,6 +41,20 @@ func (s *Service) ListSnapshots(batchID string) ([]*model.ReliabilitySnapshot, e
 }
 
 // PublishSnapshot 发布快照（不可变冻结）。
+//
+// 并发发布同一草稿或同一批次的不同草稿时，store 层 CommitSnapshotPublication
+// 通过条件更新保证恰好一次成功：第一个发布者冻结快照并封存批次，其余发布者
+// 的封存更新匹配零行 -> 事务回滚（撤销其快照冻结）-> 明确冲突。
+//
+// 服务层在此对三类失败统一返回 ErrConflict，使并发发布者都能区分“冲突”而非
+// 误以为不可变或状态错配：
+//   - 批次已被另一发布者封存（sealed）；
+//   - 快照已被另一发布者冻结（published/superseded）；
+//   - store 层事务条件更新未命中。
+//
+// 注意：GetBatch/GetSnapshot 的预读发生在事务之外，因此预读后到提交前可能被
+// 另一发布者抢先。下面的预检查只为快路径提供清晰错误；真正的并发裁决仍由
+// CommitSnapshotPublication 的事务条件更新完成。
 func (s *Service) PublishSnapshot(snapshotID string) (*model.ReliabilitySnapshot, error) {
 	sn, err := s.store.GetSnapshot(snapshotID)
 	if err != nil {
@@ -50,13 +64,29 @@ func (s *Service) PublishSnapshot(snapshotID string) (*model.ReliabilitySnapshot
 	if err != nil {
 		return nil, err
 	}
+	// 预检查：批次已封存说明另一发布者已完成最终冻结 -> 明确冲突。
+	if batch.Status == model.BatchSealed {
+		return nil, model.E(model.ErrConflict, "batch %s already sealed; snapshot publication already finalized", sn.BatchID)
+	}
 	if err := snapshot.ValidatePublication(batch.Status); err != nil {
 		return nil, err
 	}
+	// 预检查：快照已冻结/替代说明本快照已不是草稿 -> 明确冲突。
+	if sn.Status.IsImmutable() {
+		return nil, model.E(model.ErrConflict, "snapshot %s already %s; cannot republish", snapshotID, sn.Status)
+	}
 	if err := snapshot.Publish(sn); err != nil {
+		// snapshot.Publish 仅在状态非法时报错，等价于已被冻结 -> 冲突。
+		if model.IsKind(err, model.ErrConflict) || model.IsKind(err, model.ErrImmutable) {
+			return nil, model.E(model.ErrConflict, "snapshot %s cannot be published: %v", snapshotID, err)
+		}
 		return nil, err
 	}
 	if err := s.store.CommitSnapshotPublication(snapshotID, sn.BatchID, sn.FrozenAt); err != nil {
+		// 并发抢断：条件更新零命中 -> 已被另一发布者冻结/封存 -> 明确冲突。
+		if model.IsKind(err, model.ErrConflict) {
+			return nil, err
+		}
 		return nil, err
 	}
 	return s.store.GetSnapshot(snapshotID)
