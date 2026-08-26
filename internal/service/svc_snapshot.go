@@ -77,7 +77,14 @@ func (s *Service) SupersedeSnapshot(snapshotID string) (*model.ReliabilitySnapsh
 	return s.store.GetSnapshot(snapshotID)
 }
 
-// GetOverlap 计算指定两条边或两个窗口的重叠值（查询用）。
+// GetOverlap 计算两个窗口的重叠值（即时查询用）。
+//
+// 校正与重叠语义与批次诊断 (diag.Diagnose) 完全一致：对每个窗口加载样本、
+// 做偏置校正（重加权）、计算分布重叠积分。跨批次窗口一律拒绝（保留原有行为）。
+//
+// 与诊断语义对齐的关键：诊断会丢弃 WindowExcluded 窗口（不参与重叠判定），
+// 即时查询同样必须拒绝涉及已排除窗口的查询——否则会在被判定不可用的窗口上
+// 返回与批次结论相矛盾的重叠值（例如即时查询显示“重叠充分”而批次诊断判定断层）。
 func (s *Service) GetOverlap(windowA, windowB string) (float64, error) {
 	wa, err := s.store.GetWindow(windowA)
 	if err != nil {
@@ -87,8 +94,16 @@ func (s *Service) GetOverlap(windowA, windowB string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// 跨批次窗口拒绝：保留原有行为。
 	if wa.BatchID != wb.BatchID {
 		return 0, model.E(model.ErrInvalid, "windows belong to different batches")
+	}
+	// 与诊断语义对齐：已排除窗口不参与重叠判定。
+	if wa.Status == model.WindowExcluded {
+		return 0, model.E(model.ErrInvalid, "window %s is excluded", windowA)
+	}
+	if wb.Status == model.WindowExcluded {
+		return 0, model.E(model.ErrInvalid, "window %s is excluded", windowB)
 	}
 	batch, err := s.store.GetBatch(wa.BatchID)
 	if err != nil {
@@ -102,6 +117,7 @@ func (s *Service) GetOverlap(windowA, windowB string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// 偏置校正（重加权），与 diag.Diagnose 使用相同的 CorrectWindow。
 	correctedA, _ := weight.CorrectWindow(sa, weight.BiasParams{
 		Center: wa.Center, SpringConst: wa.SpringConst, KT: batch.KT,
 	})

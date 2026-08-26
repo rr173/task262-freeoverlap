@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"task262-freeoverlap/internal/model"
+	"task262-freeoverlap/internal/overlap"
 )
 
 // --- 重叠与边 ---
@@ -20,23 +21,14 @@ func (s *Server) handleGetOverlap(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// 分类语义与批次诊断 (overlap.PairOverlap) 完全一致：统一阈值取自
+	// overlap.Thresholds，避免硬编码与批次诊断漂移。
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window_a": a,
 		"window_b": b,
 		"overlap":  o,
-		"class":    classifyText(o),
+		"class":    overlap.Classify(o),
 	})
-}
-
-func classifyText(o float64) string {
-	switch {
-	case o >= 0.3:
-		return "sufficient"
-	case o < 0.05:
-		return "gap"
-	default:
-		return "marginal"
-	}
 }
 
 func (s *Server) handleListEdges(w http.ResponseWriter, r *http.Request) {
